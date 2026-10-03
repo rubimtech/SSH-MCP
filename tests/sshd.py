@@ -50,6 +50,8 @@ ACCEPT_POLL = 0.1
 RELAY_CHUNK = 32_768
 RELAY_POLL = 0.05
 FORWARD_ACCEPT_TIMEOUT = 15.0
+#: Сколько держать канал после EOF цели, дожидаясь закрытия от клиента.
+FORWARD_DRAIN_TIMEOUT = 5.0
 #: Пауза перед первым байтом вывода: см. комментарий в ``_SshdInterface._serve_exec``.
 EXEC_REPLY_GRACE = 0.05
 SHELL_WALL_LIMIT = 20.0
@@ -563,6 +565,7 @@ class _SshdInterface(paramiko.ServerInterface):
                 self._server.forward_errors.append("accept() timed out")
                 return
             _relay(channel, upstream)
+            _drain_until_client_close(channel, FORWARD_DRAIN_TIMEOUT)
         except Exception as exc:  # noqa: BLE001 - клиент мог уйти раньше
             self._server.forward_errors.append(f"{type(exc).__name__}: {exc}")
             if channel is not None:
@@ -616,6 +619,29 @@ def _relay(channel: paramiko.Channel, upstream: socket.socket) -> None:
             channel.sendall(payload)
         except Exception:  # noqa: BLE001
             return
+
+
+def _drain_until_client_close(channel: paramiko.Channel, timeout: float) -> None:
+    """Держать канал живым, пока клиент не закроет его сам.
+
+    Как только цель (upstream) отдала EOF, `_relay` завершается, и если сразу
+    отпустить серверный объект канала, paramiko успевает снять его с transports
+    раньше, чем клиент выйдет из `open_channel`. Клиент тогда получает
+    подтверждение открытия уже несуществующего канала и падает с
+    «Unable to open channel». Настоящий форвардер после EOF цели шлёт клиенту
+    SHUT_WR, но канал не рвёт — ждёт закрытия от клиента. Здесь то же самое.
+    """
+    deadline = time.time() + timeout
+    while not channel.closed and time.time() < deadline:
+        try:
+            if channel.recv_ready():
+                channel.recv(RELAY_CHUNK)
+                continue
+            if channel.eof_received:
+                break
+        except Exception:  # noqa: BLE001 - клиент мог оборваться
+            return
+        time.sleep(0.01)
 
 
 def _shutdown(sock: socket.socket, how: int) -> None:

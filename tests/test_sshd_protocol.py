@@ -34,6 +34,13 @@ def _echo_server(payload: bytes) -> tuple[socket.socket, threading.Thread]:
         with connection:
             try:
                 connection.sendall(payload)
+                # Держим соединение открытым, пока клиент не закроет его сам:
+                # иначе сервер рвёт канал до того, как клиент успевает прочитать
+                # данные, и проверка direct-tcpip становится гонкой.
+                connection.settimeout(10)
+                while True:
+                    if not connection.recv(32_768):
+                        break
             except OSError:  # pragma: no cover
                 pass
 
