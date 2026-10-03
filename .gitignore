@@ -1,28 +1,67 @@
-# Секреты и рантайм-состояние — никогда в репозиторий
+# ─── Секреты ───────────────────────────────────────────────────────────────
+# .env рядом с servers.yaml содержит пароли и пути к ключам. В репозиторий не
+# попадает никогда; вместо него коммитится .env.example с пустыми значениями.
 .env
 .env.*
 !.env.example
+
+# ─── Рантайм-состояние ─────────────────────────────────────────────────────
+# Журнал вызовов (server/outcome/detail) — растёт без ограничений при отладке.
 audit.jsonl
+audit.jsonl.*
 logs/
 
-# Отпечатки ключей этой машины (TOFU-файл рядом с servers.yaml) и их бэкапы
+# Отпечатки host-key этой машины: TOFU-файл рядом с servers.yaml плюс бэкапы.
+# Репозиторий переносится между машинами, а ключи у каждой свои.
 known_hosts
 known_hosts.bak
 *.bak
 
-# Фоновые задачи ssh_execute(background=True) пишут логи сюда
+# Фоновые задачи ssh_execute(background=True) пишут логи сюда.
 ssh-mcp-job-*/
 
-# Python
+# ─── Python ────────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
 *.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Окружения
 .venv/
 venv/
+env/
+ENV/
 
-# Кеши инструментов
+# ─── Кеши инструментов ─────────────────────────────────────────────────────
+# .mypy_cache один занимает ~35 МБ — держать его под git бессмысленно.
 .mypy_cache/
+.dmypy.json
+dmypy.json
 .ruff_cache/
 .pytest_cache/
-.coverage
+.cache/
 htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+
+# ─── Локальные выгрузки и редакторы ────────────────────────────────────────
+*.log
+*.tmp
+*.orig
+*.rej
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
