@@ -636,8 +636,16 @@ def _open_direct(
     steps, skipped = profile.auth.auth_plan(agent_keys=_agent_has_keys())
     if not steps:
         detail = f" — skipped: {'; '.join(skipped)}" if skipped else ""
+        # В тексте ошибки — только имя сервера из конфигурации. Адрес, логин и
+        # пути на этой машине модели не нужны; полная картина уходит в лог.
+        logger.warning(
+            "No usable SSH credentials for %s (host=%s user=%s)%s",
+            profile.name,
+            profile.target,
+            detail,
+        )
         raise AuthError(
-            f"No usable SSH credentials for {profile.target}{detail}",
+            f"No usable SSH credentials for {profile.name}{detail}",
             attempts=skipped,
         )
 
@@ -690,8 +698,15 @@ def _open_direct(
             if sock is not None:
                 sock.close()
             reason = _short(exc)
+            logger.warning(
+                "Cannot connect to %s (host=%s): %s: %s",
+                profile.name,
+                profile.target,
+                type(exc).__name__,
+                reason,
+            )
             raise SshConnectionError(
-                f"Cannot connect to {profile.target} — {type(exc).__name__}: {reason}"
+                f"Cannot connect to {profile.name} — {type(exc).__name__}: {reason}"
             ) from exc
         else:
             _tune_transport(profile, client)
@@ -708,8 +723,17 @@ def _open_direct(
 
     tried = "; ".join(failures) or "nothing"
     skipped_note = f"; skipped: {', '.join(skipped)}" if skipped else ""
+    logger.warning(
+        "Authentication failed for %s (host=%s): tried %s/%s: %s%s",
+        profile.name,
+        profile.target,
+        len(failures),
+        len(steps),
+        tried,
+        skipped_note,
+    )
     raise AuthError(
-        f"Authentication failed for {profile.target} "
+        f"Authentication failed for {profile.name} "
         f"(tried {len(failures)}/{len(steps)}: {tried}{skipped_note})",
         attempts=[*failures, *skipped],
     )
@@ -825,10 +849,18 @@ class ConnectionManager:
             else 0
         )
         dropped = self._drop_pooled(profile.name)
+        logger.info(
+            "Forgot host key for %s (host=%s, store=%s): %s removed",
+            profile.name,
+            profile.host_key_name,
+            store.path,
+            removed,
+        )
         return {
+            # Наружу — только имя сервера и счётчики. Имя хоста и путь к файлу
+            # ключей возвращаются в лог, а не в ответ инструмента: сброс делает
+            # сервер, модели знать где он это делает не нужно.
             "server": profile.name,
-            "host": profile.host_key_name,
-            "known_hosts": str(store.path),
             "removed_entries": removed,
             "removed_from_user_known_hosts": removed_foreign,
             "in_user_known_hosts": bool(
@@ -917,10 +949,15 @@ class ConnectionManager:
         return await asyncio.to_thread(self._run_blocking, profile, action, True)
 
     async def describe(self, server: str | None = None) -> dict[str, Any]:
-        """Return connection facts about a server, verified against the host."""
+        """Return what a server is and whether it answers right now.
+
+        Наружу отдаётся :meth:`ServerProfile.public`: описание, комментарии и
+        теги, по которым агент выбирает машину, плюс результат живой пробы.
+        Адрес, порт, логин и пути остаются внутри — подключение идёт без агента.
+        """
         profile = self.resolve(server)
-        info = profile.summary()
-        info["jump_chain"] = list(self._registry.chain(profile.name))
+        info = profile.public(jump_chain=list(self._registry.chain(profile.name)))
+        info["host_key_policy"] = profile.host_key_policy
 
         def probe(client: paramiko.SSHClient) -> dict[str, Any]:
             _, stdout, _ = client.exec_command("uname -srm", timeout=15)
@@ -929,6 +966,7 @@ class ConnectionManager:
         try:
             info["probe"] = await self.run(profile, probe)
         except Exception as exc:  # noqa: BLE001 - reported to the caller, not raised
+            logger.warning("Probe failed for %s: %s", profile.name, exc)
             info["probe"] = {"reachable": False, "error": str(exc)}
         return info
 
@@ -1099,8 +1137,13 @@ class ConnectionManager:
         if jump_client is not None:
             transport = jump_client.get_transport()
             if transport is None or not transport.is_active():
+                logger.warning(
+                    "Jump host dropped the session before reaching %s (host=%s)",
+                    hop.name,
+                    hop.target,
+                )
                 raise SshConnectionError(
-                    f"Jump host dropped the session before reaching {hop.target}"
+                    f"Jump host dropped the session before reaching {hop.name}"
                 )
             channel_factory = _channel_opener(transport, hop.host, hop.port)
 
@@ -1140,7 +1183,8 @@ class ConnectionManager:
             # Причина уже сформулирована в ``_open_direct`` — не заворачиваем
             # второй раз, иначе в тексте остаётся «SshConnectionError: ...».
             raise last_error
-        raise SshConnectionError(f"Cannot reach {hop.target} — {reason}")
+        logger.warning("Cannot reach %s (host=%s): %s", hop.name, hop.target, reason)
+        raise SshConnectionError(f"Cannot reach {hop.name} — {reason}")
 
     def _open_chain(self, profile: ServerProfile) -> PooledConnection:
         names = self._registry.chain(profile.name)
@@ -1161,14 +1205,27 @@ class ConnectionManager:
             except SshConnectionError as exc:
                 for client in reversed(clients):
                     client.close()
+                logger.warning(
+                    "Incomplete connection chain to %s (host=%s): %s",
+                    profile.name,
+                    profile.target,
+                    exc,
+                )
                 raise SshConnectionError(
-                    f"Incomplete connection chain to {profile.target} — {exc}"
+                    f"Incomplete connection chain to {profile.name} — {exc}"
                 ) from exc
             except Exception as exc:  # noqa: BLE001 - причина попадает в текст ошибки
                 for client in reversed(clients):
                     client.close()
+                logger.warning(
+                    "Incomplete connection chain to %s (host=%s): %s: %s",
+                    profile.name,
+                    profile.target,
+                    type(exc).__name__,
+                    _short(exc),
+                )
                 raise SshConnectionError(
-                    f"Incomplete connection chain to {profile.target} — "
+                    f"Incomplete connection chain to {profile.name} — "
                     f"{type(exc).__name__}: {_short(exc)}"
                 ) from exc
             clients.append(current)

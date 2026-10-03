@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Sequence
 
 from .errors import AuthError
 
@@ -75,10 +75,13 @@ class AuthConfig:
     password_fallback: bool = True
 
     def describe(self) -> dict[str, Any]:
-        """Redacted, agent-safe description of the credentials."""
+        """Что видно про учётные данные: способ и наличие секретов, без их значений.
+
+        Локальный путь к ключу сюда не попадает: подключение должно происходить
+        без участия агента, и знать, где лежит приватный ключ, модели не нужно.
+        """
         return {
             "type": self.type,
-            "key_path": str(self.key_path) if self.key_path else None,
             "key_exists": bool(self.key_path and self.key_path.is_file()),
             "passphrase_configured": bool(self.passphrase),
             "password_configured": bool(self.password),
@@ -206,7 +209,12 @@ class ServerProfile:
         return canonical_host_name(self.host, self.port)
 
     def summary(self) -> dict[str, Any]:
-        """Agent-safe view: everything except the secrets themselves."""
+        """Вид для оператора: всё, включая координаты подключения.
+
+        В ответах инструментов использовать нельзя — там работает
+        :meth:`public`, потому что модель не должна видеть, как именно
+        происходит подключение.
+        """
         return {
             "name": self.name,
             "host": self.host,
@@ -227,4 +235,27 @@ class ServerProfile:
             "keepalive_interval": self.keepalive_interval,
             "auth": self.auth.describe(),
             "defined_at": self.defined_at,
+        }
+
+    def public(self, *, jump_chain: Sequence[str] = ()) -> dict[str, Any]:
+        """Единственный вид, который видит модель.
+
+        Подключение должно происходить без участия агента, поэтому наружу
+        отдаются только имя, описание и способ выбрать сервер. Всё, чем
+        подключение устроено внутри — адрес, порт, логин, пути на этой машине,
+        отпечатки ключей, таймауты, — убрано: модели это не помогает, зато
+        попадает в её контекст, логи и скриншоты диалога.
+
+        Args:
+            jump_chain: полная цепочка прыжков (имена серверов, не адреса).
+        """
+        return {
+            "name": self.name,
+            "is_default": self.is_default,
+            "description": self.description,
+            "comments": list(self.comments),
+            "tags": list(self.tags),
+            "jump_chain": list(jump_chain),
+            "default_workdir": self.default_workdir,
+            "auth": self.auth.describe(),
         }

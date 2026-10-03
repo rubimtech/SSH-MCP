@@ -326,7 +326,7 @@ def register(mcp: FastMCP, ctx: ToolContext) -> None:
                 lambda sftp: _find_remote(sftp, root, query),
             )
             payload["server"] = profile.name
-            payload["host"] = profile.host
+            payload["server"] = profile.name
             return payload
 
         return await guarded(run, name="ssh_find", server=server, summary=f"{pattern} @ {path}")

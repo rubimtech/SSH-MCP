@@ -214,3 +214,89 @@ def test_stats_объявлен_как_словарь_словарей() -> None
     hints = typing.get_type_hints(ConnectionManager.stats)
 
     assert hints["return"] == dict[str, dict[str, typing.Any]]
+
+
+# --- непрозрачность подключения для агента ---------------------------------
+#
+# Подключение выполняет сервер, модель только называет сервер. Всё, чем оно
+# устроено внутри (адрес, порт, логин, пути на этой машине, отпечатки ключей),
+# в ответах инструментов появляться не должно: это попадёт в контекст модели,
+# в логи и в скриншоты диалога. Тест ломается, если кто-то вернёт эти поля.
+
+#: Ключи, которые нельзя отдавать ни в одном ответе агента.
+FORBIDDEN_FIELDS = (
+    "host",
+    "port",
+    "username",
+    "known_hosts",
+    "host_key_name",
+    "host_key_fingerprint",
+    "config_file",
+    "defined_at",
+    "key_path",
+    "target",
+    "backup",
+)
+
+
+def _keys(payload: typing.Any) -> set[str]:
+    """Все ключи во вложенной структуре ответа."""
+    found: set[str] = set()
+    if isinstance(payload, dict):
+        found.update(payload)
+        for value in payload.values():
+            found.update(_keys(value))
+    elif isinstance(payload, list):
+        for item in payload:
+            found.update(_keys(item))
+    return found
+
+
+def test_перечисление_не_раскрывает_данные_подключения(call, ctx) -> None:
+    """В ssh_list_servers нет ни координат, ни путей, ни отпечатков."""
+    listing = call.json("ssh_list_servers")
+
+    assert listing["servers"], "в перечислении должны быть серверы"
+    leaked = _keys(listing) & set(FORBIDDEN_FIELDS)
+    assert not leaked, f"перечисление раскрывает: {sorted(leaked)}"
+
+
+def test_сведения_о_сервере_не_раскрывают_данные_подключения(call) -> None:
+    """ssh_server_info показывает, кто это и отвечает ли он, но не как подключиться."""
+    info = call.json("ssh_server_info", {"server": "testbox"})
+
+    assert info["probe"]["reachable"] is True
+    leaked = _keys(info) & set(FORBIDDEN_FIELDS)
+    assert not leaked, f"ssh_server_info раскрывает: {sorted(leaked)}"
+
+
+def test_агент_видит_описание_и_комментарии_из_yaml(call) -> None:
+    """Выбор сервера возможен: имя, описание и комментарии на месте."""
+    listing = call.json("ssh_list_servers")
+    server = listing["servers"][0]
+
+    assert server["name"]
+    assert server["description"]
+    assert isinstance(server["comments"], list)
+    assert "tags" in server
+    assert "jump_chain" in server
+
+
+def test_сброс_ключа_не_возвращает_адрес_и_путь(call) -> None:
+    """ssh_forget_host_key отвечает счётчиками, а не координатами."""
+    payload = call.json("ssh_forget_host_key", {"host": "testbox"})
+
+    assert payload["server"] == "testbox"
+    assert "status" in payload
+    leaked = _keys(payload) & set(FORBIDDEN_FIELDS)
+    assert not leaked, f"сброс ключа раскрывает: {sorted(leaked)}"
+
+
+def test_шпаргалка_не_печатает_адреса(call, ctx) -> None:
+    """ssh_guide описывает серверы именами, без user@host:port."""
+    profile = ctx.registry.get("testbox")
+    guide = call.text("ssh_guide", {"topic": "servers"})
+
+    assert "testbox" in guide
+    assert profile.host not in guide
+    assert f"{profile.username}@" not in guide

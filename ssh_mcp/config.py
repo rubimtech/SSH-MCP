@@ -133,7 +133,11 @@ class ServerRegistry:
         return list(self.servers)
 
     def describe(self) -> list[dict[str, Any]]:
-        return [self.servers[name].summary() for name in self.servers]
+        """Перечисление для агента: без адресов, портов, логинов и локальных путей."""
+        return [
+            self.servers[name].public(jump_chain=self.chain(name))
+            for name in self.servers
+        ]
 
     def get(self, name: str | None) -> ServerProfile:
         """Resolve a server by name, falling back to host/tag matching."""

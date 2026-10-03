@@ -112,13 +112,15 @@ def _optional_profile(ctx: ToolContext, server: str) -> ServerProfile | None:
 
 
 def _host_key_view(profile: ServerProfile) -> dict[str, Any]:
+    """Что агент знает о проверке ключа: только политику, без путей и отпечатков."""
     return {
         "policy": profile.host_key_policy,
-        "known_hosts": str(profile.known_hosts) if profile.known_hosts else None,
         "note": (
-            "auto_add: ключи нигде не сохраняются, проверки хоста нет"
+            "auto_add: первый увиденный ключ запоминается и дальше сверяется"
             if profile.host_key_policy == "auto_add"
-            else "reject: ключ сверяется с known_hosts, неизвестный хост отклоняется"
+            else "reject: ключ сверяется с записью, неизвестный хост отклоняется"
+            if profile.host_key_policy == "reject"
+            else "pin: сверяется только с закреплённым отпечатком, смена ключа рвёт связь"
         ),
     }
 
@@ -128,12 +130,10 @@ def _connection_payload(ctx: ToolContext, server: str) -> dict[str, Any]:
     pool = ctx.connections.stats()
     return {
         "server": profile.name,
-        "config_file": str(ctx.registry.path),
-        "defined_at": profile.defined_at,
         "jump_chain": list(ctx.registry.chain(profile.name)),
         "pooled": profile.name in pool,
         "pool": pool.get(profile.name),
-        **profile.summary(),
+        **profile.public(jump_chain=ctx.registry.chain(profile.name)),
         "host_key": _host_key_view(profile),
     }
 
@@ -144,22 +144,14 @@ def _connections_payload(ctx: ToolContext) -> dict[str, Any]:
     for name in ctx.registry.names():
         profile = ctx.registry.servers[name]
         servers.append(
-            {
-                "name": profile.name,
-                "host": profile.host,
-                "port": profile.port,
-                "username": profile.username,
-                "description": profile.description,
-                "tags": list(profile.tags),
-                "is_default": profile.is_default,
-                "jump_chain": list(ctx.registry.chain(name)),
+            profile.public(jump_chain=ctx.registry.chain(name))
+            | {
                 "pooled": name in pool,
                 "pool": pool.get(name),
             }
         )
     return {
         "uri": CONNECTIONS_URI,
-        "config_file": str(ctx.registry.path),
         "default_server": ctx.registry.default_server,
         "count": len(servers),
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -169,6 +161,8 @@ def _connections_payload(ctx: ToolContext) -> dict[str, Any]:
             "pooled=true означает живое соединение в общем пуле этого процесса.",
             "Подробности одного сервера: ssh://connections/{server}.",
             "Секреты и ключи здесь не показываются никогда.",
+            "Адрес, порт, логин и пути на этой машине скрыты намеренно:"
+            " подключение выполняет сам сервер, агенту они не нужны.",
         ],
     }
 
@@ -220,7 +214,9 @@ def _guide_overview(ctx: ToolContext, inventory: list[dict[str, Any]]) -> dict[s
                 "С чего начать",
                 [
                     "1. ssh_list_servers — сопоставь запрос пользователя с description, "
-                    "comments и tags, получи точное имя.",
+                    "comments и tags, получи точное имя. IP, порт и логин там "
+                    "скрыты намеренно: они не нужны для выбора, а для деталей "
+                    "есть ssh_server_info.",
                     "2. ssh_server_info(server) — проверить достижимость и цепочку jump-host.",
                     "3. Дальше работа с командами или файлами; server='' берёт сервер по умолчанию.",
                 ],
@@ -249,14 +245,15 @@ def _guide_servers(ctx: ToolContext) -> dict[str, Any]:
     for name in ctx.registry.names():
         profile = ctx.registry.servers[name]
         servers.append(
-            f"{name}: {profile.target} — {profile.description or '(без описания)'} "
+            f"{name} — {profile.description or '(без описания)'} "
             f"[теги: {', '.join(profile.tags) or '-'}] "
             f"chain={' -> '.join(ctx.registry.chain(name))} "
             f"{'(сервер по умолчанию)' if profile.is_default else ''}"
         )
     return {
         "topic": "servers",
-        "summary": f"Конфигурация: {ctx.registry.path}. Сервер по умолчанию: {ctx.registry.default_server}.",
+        "summary": f"Сервер по умолчанию: {ctx.registry.default_server}. "
+        f"Всего настроено: {len(ctx.registry.names())}.",
         "sections": [
             _section("Настроенные серверы", servers),
             _section(
@@ -515,14 +512,18 @@ def register(mcp: FastMCP, ctx: ToolContext) -> None:
         match the request against `description`, `comments` and `tags`, then
         pass the chosen `name` as the `server` argument of the other tools.
 
+        IP, port and login are deliberately omitted: they do not help pick a
+        machine, and the reply ends up in logs and screenshots. Connecting is the
+        server's own job: no address, port, login or local path is exposed.
+
         Returns:
-            JSON with each server's name, host, port, username, auth type,
-            jump host, description, YAML comments and tags. Secrets are omitted.
+            JSON with each server's name, description, YAML comments, tags, jump
+            chain, working directory, auth type and reachability. No secrets, no
+            connection details.
         """
 
         def run() -> dict[str, Any]:
             return {
-                "config_file": str(ctx.registry.path),
                 "default_server": ctx.registry.default_server,
                 "count": len(ctx.registry.servers),
                 "servers": ctx.registry.describe(),
@@ -536,14 +537,16 @@ def register(mcp: FastMCP, ctx: ToolContext) -> None:
         annotations=READ_ONLY,
     )
     async def ssh_server_info(server: str) -> str:
-        """Show full details of one server and check that it is reachable.
+        """Show what one server is and check that it answers.
 
         Args:
-            server: Server name from ssh_list_servers (host or tag also work).
+            server: Server name from ssh_list_servers (a tag also works).
 
         Returns:
-            JSON with connection settings, the jump-host chain and the result
-            of a live `uname -srm` probe.
+            JSON with the description, YAML comments, tags, jump-host chain,
+            working directory and the result of a live `uname -srm` probe. The
+            address, port, login and key paths stay inside the server: you name
+            a server, connecting is not your job.
         """
         return await guarded(
             lambda: ctx.connections.describe(server),
@@ -630,9 +633,9 @@ def register(mcp: FastMCP, ctx: ToolContext) -> None:
             host: Имя сервера из ssh_list_servers либо сам адрес хоста.
 
         Returns:
-            JSON со статусом, путём к файлу known_hosts и числом удалённых
-            записей: forgotten — записи убраны, nothing_to_forget — записи не
-            было, no_store — файла known_hosts не существует вовсе.
+            JSON со статусом и числом удалённых записей: forgotten — записи
+            убраны, nothing_to_forget — записи не было, no_store — файл с
+            ключами ещё не создавался. Пути и адреса не возвращаются.
         """
 
         async def run() -> dict[str, Any]:
@@ -850,7 +853,15 @@ def _forget_via_manager(ctx: ToolContext, profile: ServerProfile) -> dict[str, A
     if "removed_entries" in payload:
         payload["status"] = "forgotten" if payload["removed_entries"] else "nothing_to_forget"
     payload.setdefault("status", "forgotten")
-    payload.setdefault("host", profile.host)
+    # Адрес хоста в ответ не возвращается: сброс выполняет сервер, модели знать
+    # ничего о его внутренностях не нужно.
+    payload.pop("host", None)
+    payload.pop("known_hosts", None)
+    logger.debug(
+        "forget_host_key via manager for %s: %s",
+        profile.name,
+        payload.get("removed_entries"),
+    )
     return payload
 
 
@@ -888,12 +899,13 @@ def _forget_in_file(
 
     body = "\n".join(kept)
     _atomic_write(path, f"{body}\n" if body else "")
+    logger.info("Removed %s host key records from %s", removed, path)
     return {
         "status": "forgotten",
         "removed_entries": removed,
         "remaining_entries": _count_entries(kept),
         "entries_examined": before,
-        "backup": str(backup) if backup.is_file() else "",
+        "backup_created": backup.is_file(),
     }
 
 
@@ -916,19 +928,23 @@ def _sweep_legacy(
         payload["legacy_entries_removed"] = extra
         payload["removed_entries"] = int(payload.get("removed_entries", 0)) + extra
         payload["status"] = "forgotten"
-    if legacy.get("backup"):
-        payload.setdefault("backup", legacy["backup"])
+    if legacy.get("backup_created"):
+        payload.setdefault("backup_created", True)
     return payload
 
 
-def _with_status(payload: dict[str, Any], target: str) -> dict[str, Any]:
-    """Дописать понятный статус и подсказку по результату сброса."""
+def _with_status(payload: dict[str, Any], label: str) -> dict[str, Any]:
+    """Дописать понятный статус и подсказку по результату сброса.
+
+    ``label`` — то, чем сервер назван в ``servers.yaml``; адрес хоста в подсказке
+    не фигурирует, потому что ответ уходит модели.
+    """
     status = str(payload.get("status", "forgotten"))
-    if payload.get("known_hosts_exists") is False:
+    if payload.get("known_hosts_present") is False:
         payload["status"] = "no_store" if status == "nothing_to_forget" else status
         payload["hint"] = (
-            f"Файла {payload.get('known_hosts', 'known_hosts')} нет: ключ хоста ни разу "
-            "не сохранялся. Сбрасывать нечего — причина проблемы в другом."
+            "Файл с ключами хоста ещё не создан: ключ ни разу не сохранялся. "
+            "Сбрасывать нечего — причина проблемы в другом."
         )
         return payload
     if status == "forgotten":
@@ -938,7 +954,7 @@ def _with_status(payload: dict[str, Any], target: str) -> dict[str, Any]:
         )
     else:
         payload["hint"] = (
-            f"Записей для {target} не найдено: ключ не был сохранён "
+            f"Записей для {label} не найдено: ключ не был сохранён "
             "(host_key_policy=auto_add) либо сбрасывать нечего."
         )
     return payload
@@ -953,15 +969,15 @@ async def _forget_host_key(ctx: ToolContext, host: str) -> dict[str, Any]:
     profile = _optional_profile(ctx, name)
     target = profile.host if profile is not None else name
     path = _known_hosts_path(ctx, profile)
+    # В ответе сервер называется тем же именем, что и в servers.yaml: адрес хоста
+    # нужен только для разбора known_hosts внутри и наружу не выходит.
+    label = profile.name if profile is not None else name
 
     base: dict[str, Any] = {
         "server": profile.name if profile is not None else "",
         "configured": profile is not None,
-        "host": target,
-        "port": profile.port if profile is not None else 22,
         "host_key_policy": profile.host_key_policy if profile is not None else "unknown",
-        "known_hosts": str(path),
-        "known_hosts_exists": path.is_file(),
+        "known_hosts_present": path.is_file(),
     }
     if profile is not None:
         base["note"] = _host_key_view(profile)["note"]
@@ -974,7 +990,7 @@ async def _forget_host_key(ctx: ToolContext, host: str) -> dict[str, Any]:
         if managed is not None:
             return _with_status(
                 _sweep_legacy(path, aliases, {**base, **managed, "handled_by": "ConnectionManager.forget_host_key"}),
-                target,
+                label,
             )
 
     # 2. Модульный хелпер WP-1, если он есть.
@@ -985,13 +1001,18 @@ async def _forget_host_key(ctx: ToolContext, host: str) -> dict[str, Any]:
             result = await result
         payload = dict(result) if isinstance(result, dict) else {"result": result}
         payload.setdefault("status", "forgotten")
-        return _with_status(_sweep_legacy(path, aliases, {**base, **payload, "handled_by": f"connection.{helper}"}), target)
+        return _with_status(_sweep_legacy(path, aliases, {**base, **payload, "handled_by": f"connection.{helper}"}), label)
 
     # 3. Свой разбор файла: до появления WP-1 и для ненастроенных хостов.
     if not path.is_file():
-        raise ConfigError(
-            f"Файл known_hosts не найден: {path}. Ничего забывать нечего — "
-            "TOFU-записи для этого сервера ещё нет (или host_key_policy=auto_add, "
-            "при котором ключи вообще не сохраняются)."
+        logger.warning(
+            "Forget host key for %s: no host key store at %s",
+            label,
+            path,
         )
-    return _with_status({**base, **_forget_in_file(path, aliases)}, target)
+        raise ConfigError(
+            "Файл с ключами хоста ещё не создан: для этого сервера TOFU-записи "
+            "ещё нет (или host_key_policy=auto_add, при котором ключи вообще "
+            "не сохраняются). Сбрасывать нечего — причина в другом."
+        )
+    return _with_status({**base, **_forget_in_file(path, aliases)}, label)

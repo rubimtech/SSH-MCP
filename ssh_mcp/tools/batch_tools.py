@@ -32,11 +32,10 @@ DEFAULT_MAX_WORKERS = 4
 MAX_WORKERS = 8
 
 
-def _job_error(name: str, host: str, started: float, exc: Exception) -> dict[str, Any]:
+def _job_error(name: str, started: float, exc: Exception) -> dict[str, Any]:
     """Отчёт по серверу, на котором команда не выполнилась."""
     return {
         "server": name,
-        "host": host,
         "error": f"{type(exc).__name__}: {exc}",
         "seconds": round(time.monotonic() - started, 2),
     }
@@ -90,11 +89,10 @@ def register(mcp: FastMCP, ctx: ToolContext) -> None:
                             lambda client: run_command(client, command, directory, seconds),
                         )
                     except Exception as exc:  # noqa: BLE001 - счёт в отчёте, не raise
-                        return _job_error(profile.name, profile.host, begin, exc)
+                        return _job_error(profile.name, begin, exc)
                     payload.update(
                         {
                             "server": profile.name,
-                            "host": profile.host,
                             "seconds": round(time.monotonic() - begin, 2),
                         }
                     )

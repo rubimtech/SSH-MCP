@@ -476,7 +476,6 @@ async def _start_job(
         "status": "started",
         "job_id": job_id,
         "server": profile.name,
-        "host": profile.host,
         "command": command,
         "workdir": workdir,
         "pid": pid,
@@ -583,7 +582,6 @@ def _describe_job(job: RemoteJob, state: dict[str, Any], alive: bool | None) -> 
     payload: dict[str, Any] = {
         "job_id": job.job_id,
         "server": job.server,
-        "host": job.host,
         "state": verdict,
         "pid": state["pid"],
         "supervisor_pid": state["supervisor_pid"],
@@ -870,7 +868,7 @@ def register(mcp: FastMCP, ctx: ToolContext) -> None:
                 profile,
                 lambda client: run_command(client, command, directory, seconds),
             )
-            result.update({"server": profile.name, "host": profile.host, "command": command})
+            result.update({"server": profile.name, "command": command})
             if directory:
                 result["workdir"] = directory
             return result
@@ -965,7 +963,6 @@ def register(mcp: FastMCP, ctx: ToolContext) -> None:
             result.update(
                 {
                     "server": profile.name,
-                    "host": profile.host,
                     "command": command,
                     "sudo_mode": "password" if secret else "nopasswd",
                 }
@@ -1057,7 +1054,6 @@ def register(mcp: FastMCP, ctx: ToolContext) -> None:
             final = steps[-1]["result"] if steps else "unknown"
             payload: dict[str, Any] = {
                 "server": profile.name,
-                "host": profile.host,
                 "pid": int(pid),
                 "requested_signal": first,
                 "ladder": ladder,
