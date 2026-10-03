@@ -1,0 +1,73 @@
+# SSH MCP — список серверов.
+#
+# Как это работает
+#   * Каждый сервер — именованная запись в секции `servers:`.
+#   * Строки `#` НАД именем сервера попадают в поле `comments` и показываются
+#     агенту в `ssh_list_servers` и `ssh_server_info` — это его карта местности.
+#   * `description` — короткое описание, `tags` — ярлыки для поиска по смыслу.
+#   * Любой строковый элемент поддерживает подстановку переменных окружения:
+#     `${VAR}` или `${VAR:-значение_по_умолчанию}`. Секреты держите в `.env`
+#     рядом с этим файлом — он в `.gitignore`.
+#   * Аутентификация: `auth.password` либо `auth.key_path` (+ `auth.passphrase`).
+#     При недоступном ключе сервер уходит на agent → password, ошибки накапливаются.
+#   * `jump_via: <имя другого сервера>` — зайти через промежуточный хост.
+#   * `default: true` — сервер по умолчанию (его использует вызов без `server`).
+
+defaults:
+  port: 22
+  username: root
+  connect_timeout: 30
+  auth_timeout: 30
+  # auto_add — TOFU: первый ключ запоминается в `known_hosts` рядом с этим файлом.
+  # reject    — ключ обязан уже быть в known_hosts, иначе отказ (без TOFU).
+  # pin       — сверять с `host_key_fingerprint` ниже; менять ключ нельзя.
+  host_key_policy: auto_add
+  keepalive_interval: 30
+
+settings:
+  # Какие локальные папки доступны для ssh_upload_file / ssh_download_file.
+  # Пустой список = доступ к любому локальному пути (не рекомендуется).
+  allowed_local_dirs:
+    - D:/DEV
+    - C:/Users/olegs/AppData/Local/Temp/kilo
+  default_server: vibecoding-prod
+
+servers:
+  # Прод-сервер VibecodingForRevit: docker-compose стек в /opt/vibecoding
+  # (backend, userapp, adminapp, postgres, rocketchat), деплой через
+  # `DC=(docker compose -f docker-compose.prod.yml ...)` — долгий, 3-6 мин на сборку,
+  # запускать через `nohup` с логом в /tmp и опрашивать, не держа SSH-вызов открытым.
+  # Бэкап БД перед всем: `/usr/local/sbin/vibecoding-backup`.
+  # Прод здесь боевой: ssh_remove/ssh_move/ssh_chmod применять точечно, не к /opt.
+  vibecoding-prod:
+    host: 201.24.62.33
+    default_workdir: /opt/vibecoding
+    description: Продакшн VibecodingForRevit (docker compose, /opt/vibecoding)
+    tags: [prod, docker, deploy, rubim.tech]
+    default: true
+    auth:
+      type: password
+      password: ${VIBECODING_PROD_PASSWORD}
+
+  # Внутренний хост (Hetzner, hostname 84949.h2.nexus) за NAT.
+  # Прямого доступа из интернета нет, соединение идёт через 201.24.62.33.
+  # Тоннели (ssh_tunnel) к его localhost-сервисам сюда не выведены — только exec/SFTP.
+  iq220-internal:
+    host: 94.159.104.99
+    jump_via: vibecoding-prod
+    description: Внутренний Hetzner-хост (h2.nexus), только через jump-host
+    tags: [internal, jump, iq220, hetzner]
+    auth:
+      type: password
+      password: ${IQ220_PASSWORD}
+    # Вариант с ключом вместо пароля (раскомментируйте и уберите password):
+    # auth:
+    #   type: key
+    #   key_path: ${IQ220_SSH_KEY:-~/.ssh/id_ed25519}
+    #   passphrase: ${IQ220_SSH_PASSPHRASE:-}
+
+# Отпечатки для `host_key_policy: pin` — получить можно через
+# `ssh_server_info` после первого connect в auto_add, затем вписать сюда:
+#   vibecoding-prod:
+#     host_key_policy: pin
+#     host_key_fingerprint: "SHA256:..."

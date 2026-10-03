@@ -1,0 +1,28 @@
+# Секреты и рантайм-состояние — никогда в репозиторий
+.env
+.env.*
+!.env.example
+audit.jsonl
+logs/
+
+# Отпечатки ключей этой машины (TOFU-файл рядом с servers.yaml) и их бэкапы
+known_hosts
+known_hosts.bak
+*.bak
+
+# Фоновые задачи ssh_execute(background=True) пишут логи сюда
+ssh-mcp-job-*/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Кеши инструментов
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/

@@ -1,0 +1,4 @@
+fastmcp>=2.0
+paramiko>=3.4
+PyYAML>=6.0
+python-dotenv>=1.0
