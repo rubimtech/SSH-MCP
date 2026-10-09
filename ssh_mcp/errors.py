@@ -25,6 +25,12 @@ class ConfigError(SshMcpError):
     code = "config_error"
 
 
+class InvalidInputError(SshMcpError):
+    """A tool argument is missing, malformed or would do something unsafe."""
+
+    code = "invalid_input"
+
+
 class UnknownServerError(SshMcpError):
     """The caller referenced a server name that is not configured."""
 
